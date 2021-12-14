@@ -21,13 +21,15 @@
 //------------------------------------------------------------------------------
 //  Local Defines
 //------------------------------------------------------------------------------
+#define VIDEO_URL "https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm"
+//#define VIDEO_URL "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
 //------------------------------------------------------------------------------
 //  Local Data Structures
 //------------------------------------------------------------------------------
 typedef struct _CustomData
 {
     GstElement *pipeline;
-    GstElement *video_source, *ai_process, *dummy_sink;
+    GstElement *video_source, *video_convert, *ai_process, *dummy_sink;
 
     guint64 num_samples; /* Number of samples generated so far (for timestamp generation) */
 
@@ -44,6 +46,7 @@ typedef struct _CustomData
 //  Local Prototypes
 //------------------------------------------------------------------------------
 static GstFlowReturn new_sample(GstElement *sink, CustomData *data);
+static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data);
 /*##############################################################################
 ##  Public Function Implementation                                            ##
 ##############################################################################*/
@@ -63,7 +66,8 @@ int main(int argc, const char *argv[])
     gst_init(NULL, NULL);
 
     // create elements
-    data.video_source = gst_element_factory_make("videotestsrc", "source");
+    data.video_source = gst_element_factory_make("uridecodebin", "source");
+    data.video_convert = gst_element_factory_make("videoconvert", "videoconvert");
     //data.ai_process = gst_element_factory_make("videotestsrc", "source");
     data.dummy_sink = gst_element_factory_make("autovideosink", "sink");
 
@@ -71,23 +75,27 @@ int main(int argc, const char *argv[])
     data.pipeline = gst_pipeline_new("pipeline");
 
     // check above
-    if (!data.video_source || !data.dummy_sink || !data.pipeline)
+    if (!data.video_source || !data.video_convert || !data.dummy_sink || !data.pipeline)
     {
         g_printerr("Not all elements could be created.\n");
         return -1;
     }
 
     // build the pipeline
-    gst_bin_add_many(GST_BIN(data.pipeline), data.video_source, data.dummy_sink, NULL);
-    if (gst_element_link(data.video_source, data.dummy_sink) != TRUE)
+    gst_bin_add_many(GST_BIN(data.pipeline), data.video_source, data.video_convert, data.dummy_sink, NULL);
+    if (gst_element_link_many(data.video_convert, data.dummy_sink, NULL) != TRUE)
     {
-        g_printerr("video_source and dummy_sink could not be linked\n");
+        g_printerr("video_convert and dummy_sink could not be linked\n");
         gst_object_unref(data.pipeline);
         return -1;
     }
 
     // set element's properties
-    g_object_set(data.video_source, "pattern", 0, NULL);
+    //g_object_set(data.video_source, "pattern", 0, NULL);
+    g_object_set(data.video_source, "uri", VIDEO_URL, NULL);
+
+    // connect to the pad-added signal
+    g_signal_connect(data.video_source, "pad-added", G_CALLBACK(pad_added_handler), &data);
 
     // start playing
     ret = gst_element_set_state(data.pipeline, GST_STATE_PLAYING);
@@ -158,4 +166,52 @@ static GstFlowReturn new_sample(GstElement *sink, CustomData *data)
     }
 
     return GST_FLOW_ERROR;
+}
+
+
+static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data)
+{
+    GstPad *sink_pad = gst_element_get_static_pad(data->video_convert, "sink");
+    GstPadLinkReturn ret;
+    GstCaps *new_pad_caps = NULL;
+    GstStructure *new_pad_struct = NULL;
+    const gchar *new_pad_type = NULL;
+
+    g_print("Received new pad '%s' from '%s':\n", GST_PAD_NAME(new_pad), GST_ELEMENT_NAME(src));
+
+    /* If our converter is already linked, we have nothing to do here */
+    if (gst_pad_is_linked(sink_pad))
+    {
+        g_print("We are already linked. Ignoring.\n");
+        goto exit;
+    }
+
+    /* Check the new pad's type */
+    new_pad_caps = gst_pad_get_current_caps(new_pad);
+    new_pad_struct = gst_caps_get_structure(new_pad_caps, 0);
+    new_pad_type = gst_structure_get_name(new_pad_struct);
+    if (!g_str_has_prefix(new_pad_type, "video/x-raw")) // "audio/x-raw"
+    {
+        g_print("It has type '%s' which is not raw video. Ignoring.\n", new_pad_type);
+        goto exit;
+    }
+
+    /* Attempt the link */
+    ret = gst_pad_link(new_pad, sink_pad);
+    if (GST_PAD_LINK_FAILED(ret))
+    {
+        g_print("Type is '%s' but link failed.\n", new_pad_type);
+    }
+    else
+    {
+        g_print("Link succeeded (type '%s').\n", new_pad_type);
+    }
+
+exit:
+    /* Unreference the new pad's caps, if we got them */
+    if (new_pad_caps != NULL)
+        gst_caps_unref(new_pad_caps);
+
+    /* Unreference the sink pad */
+    gst_object_unref(sink_pad);
 }
