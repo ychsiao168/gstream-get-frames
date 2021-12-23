@@ -13,9 +13,9 @@ RM = rm -f
 #  CFLAGS, LDFLAGS
 #===============================================================================
 OPT= -O2
-CFLAGS=-Wall -I$(srcdir) $(OPT) -pthread -I/usr/include/gstreamer-1.0 -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include
+CFLAGS=-Wall -I$(srcdir) $(OPT) $(shell pkg-config --cflags gstreamer-1.0)
 LDFLAGS=-s
-LDLIBS=-lgstreamer-1.0 -lgobject-2.0 -lglib-2.0
+LDLIBS=$(shell pkg-config --libs gstreamer-1.0 gstreamer-video-1.0)
 #===============================================================================
 #  OBJS and Output
 #===============================================================================

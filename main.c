@@ -1,10 +1,10 @@
 //==============================================================================
 /*
     File Name:      main.c
-    Created:        2021/12/14   
-    Author:         
+    Created:        2021/12/14
+    Author:
     Description:
-   
+
 */
 //==============================================================================
 //
@@ -17,31 +17,39 @@
 //  Include Files
 //------------------------------------------------------------------------------
 #include <gst/gst.h>
+#include <gst/video/video-frame.h>
 #include <stdio.h>
 //------------------------------------------------------------------------------
 //  Local Defines
 //------------------------------------------------------------------------------
-#define VIDEO_URL "https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm"
+#define USE_STREAM 1 // 0: videotestsrc, 1: stream
+
+#if USE_STREAM == 1
+#define VIDEO_URL "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+//#define VIDEO_URL "https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm"
 //#define VIDEO_URL "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
+#endif
 //------------------------------------------------------------------------------
 //  Local Data Structures
 //------------------------------------------------------------------------------
 typedef struct _CustomData
 {
     GstElement *pipeline;
-    GstElement *video_source, *video_convert, *ai_process, *dummy_sink;
+    GstElement *video_source, *tee, *video_convert, *dummy_sink, *app_sink;
+    GstElement *video_queue, *app_queue;
 
     guint64 num_samples; /* Number of samples generated so far (for timestamp generation) */
 
     guint sourceid; /* To control the GSource */
 
     GMainLoop *main_loop; /* GLib's Main Loop */
-    GstBus *bus;          // todo
-    GstMessage *msg;      // todo
+    GstBus *bus;
+    GstMessage *msg;
 } CustomData;
 //------------------------------------------------------------------------------
 //  Global Variables
 //------------------------------------------------------------------------------
+//static GstVideoInfo sg_vinfo;
 //------------------------------------------------------------------------------
 //  Local Prototypes
 //------------------------------------------------------------------------------
@@ -64,38 +72,62 @@ int main(int argc, const char *argv[])
 
     // init GStreamer
     gst_init(NULL, NULL);
+    //gst_video_info_init(&sg_vinfo);
 
     // create elements
+#if USE_STREAM == 1
     data.video_source = gst_element_factory_make("uridecodebin", "source");
+#else
+    data.video_source = gst_element_factory_make("videotestsrc", "source");
+#endif
+
+    data.tee = gst_element_factory_make("tee", "tee");
+    data.video_queue = gst_element_factory_make("queue", "video_queue");
+    data.app_queue = gst_element_factory_make("queue", "app_queue");
     data.video_convert = gst_element_factory_make("videoconvert", "videoconvert");
-    //data.ai_process = gst_element_factory_make("videotestsrc", "source");
-    data.dummy_sink = gst_element_factory_make("autovideosink", "sink");
+    data.dummy_sink = gst_element_factory_make("autovideosink", "sink"); // autovideosink, fakesink
+    data.app_sink = gst_element_factory_make("appsink", "app_sink");
 
     // create pipeline
     data.pipeline = gst_pipeline_new("pipeline");
 
     // check above
-    if (!data.video_source || !data.video_convert || !data.dummy_sink || !data.pipeline)
+    if (!data.video_source || !data.tee || !data.video_queue || !data.app_queue || !data.video_convert || !data.dummy_sink || !data.app_sink || !data.pipeline)
     {
         g_printerr("Not all elements could be created.\n");
         return -1;
     }
 
     // build the pipeline
-    gst_bin_add_many(GST_BIN(data.pipeline), data.video_source, data.video_convert, data.dummy_sink, NULL);
-    if (gst_element_link_many(data.video_convert, data.dummy_sink, NULL) != TRUE)
+    gst_bin_add_many(GST_BIN(data.pipeline), data.video_source,
+                     data.tee,
+                     data.video_queue, data.dummy_sink,
+                     data.video_convert, data.app_queue, data.app_sink, NULL);
+#if USE_STREAM == 0
+    gst_element_link_many(data.video_source, data.video_convert, NULL);
+#endif
+    if (!gst_element_link_many(data.video_convert, data.tee, NULL) ||
+        !gst_element_link_many(data.tee, data.video_queue, data.dummy_sink, NULL) ||
+        !gst_element_link_many(data.tee, data.app_queue, data.app_sink, NULL))
     {
-        g_printerr("video_convert and dummy_sink could not be linked\n");
+        g_printerr("link failed\n");
         gst_object_unref(data.pipeline);
         return -1;
     }
 
     // set element's properties
-    //g_object_set(data.video_source, "pattern", 0, NULL);
-    g_object_set(data.video_source, "uri", VIDEO_URL, NULL);
+#if USE_STREAM == 1
+    g_object_set(data.video_source, "uri", VIDEO_URL, NULL); // uridecodebin
+#else
+    g_object_set(data.video_source, "pattern", 0, NULL); // videotestsrc
+#endif
 
     // connect to the pad-added signal
     g_signal_connect(data.video_source, "pad-added", G_CALLBACK(pad_added_handler), &data);
+
+    // configure appsink
+    g_object_set(data.app_sink, "emit-signals", TRUE, NULL);
+    g_signal_connect(data.app_sink, "new-sample", G_CALLBACK(new_sample), &data);
 
     // start playing
     ret = gst_element_set_state(data.pipeline, GST_STATE_PLAYING);
@@ -154,20 +186,34 @@ int main(int argc, const char *argv[])
 static GstFlowReturn new_sample(GstElement *sink, CustomData *data)
 {
     GstSample *sample;
+    GstBuffer *buffer;
+    GstMapInfo map;
+    //GstVideoFrame vframe;
 
     /* Retrieve the buffer */
     g_signal_emit_by_name(sink, "pull-sample", &sample);
+
     if (sample)
     {
-        /* The only thing we do in this example is print a * to indicate a received buffer */
-        g_print("*");
+        buffer = gst_sample_get_buffer(sample);
+        gst_buffer_map(buffer, &map, GST_MAP_READ);
+        // if(gst_video_frame_map(&vframe, &sg_vinfo, buffer, GST_MAP_READ))
+        // {
+        //     g_print("frame size=%6lu, width=%4d, height=%4d\n", map.size, vframe.info.width, vframe.info.height);
+        //     gst_video_frame_unmap (&vframe);
+        // }
+        g_print("frame size=%6lu, data=0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X\n",
+            map.size,
+            *(guint16*)&map.data[0], *(guint16*)&map.data[1], *(guint16*)&map.data[2], *(guint16*)&map.data[3],
+            *(guint16*)&map.data[4], *(guint16*)&map.data[5], *(guint16*)&map.data[6], *(guint16*)&map.data[7]
+        );
+        gst_buffer_unmap (buffer, &map);
         gst_sample_unref(sample);
         return GST_FLOW_OK;
     }
 
     return GST_FLOW_ERROR;
 }
-
 
 static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data)
 {
