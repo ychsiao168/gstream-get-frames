@@ -18,16 +18,26 @@
 //------------------------------------------------------------------------------
 #include <gst/gst.h>
 #include <gst/video/video-frame.h>
-#include <stdio.h>
+
 //------------------------------------------------------------------------------
 //  Local Defines
 //------------------------------------------------------------------------------
-#define USE_STREAM 1 // 0: videotestsrc, 1: stream
+#define USE_STREAM 1    // 1: souphttpsrc + qtdemux + avdec_h264,
+                        // 2: souphttpsrc + matroskademux + avdec_vp8
+                        // 3: rtspsrc + rtph264depay + avdec_h264
 
 #if USE_STREAM == 1
 #define VIDEO_URL "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-//#define VIDEO_URL "https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm"
-//#define VIDEO_URL "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
+// $ gst-launch-1.0 souphttpsrc location=http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4 ! qtdemux name=d d.video_0 ! avdec_h264 ! videoconvert ! autovideosink
+
+#elif USE_STREAM == 2
+#define VIDEO_URL "https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm"
+// $ gst-launch-1.0 souphttpsrc location=https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm ! matroskademux name=d d.video_0 ! avdec_vp8 ! videoconvert ! autovideosink
+
+#elif USE_STREAM == 3
+#define VIDEO_URL "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
+// $ gst-launch-1.0 rtspsrc location=rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink
+
 #endif
 //------------------------------------------------------------------------------
 //  Local Data Structures
@@ -35,8 +45,12 @@
 typedef struct _CustomData
 {
     GstElement *pipeline;
-    GstElement *video_source, *tee, *video_convert, *dummy_sink, *app_sink;
+    GstElement *video_source, *demuxer;
+    GstElement *tee, *video_decoder, *video_convert, *dummy_sink, *app_sink;
     GstElement *video_queue, *app_queue;
+#if USE_STREAM == 3
+    GstElement *h264parse;
+#endif
 
     guint64 num_samples; /* Number of samples generated so far (for timestamp generation) */
 
@@ -74,11 +88,23 @@ int main(int argc, const char *argv[])
     gst_init(NULL, NULL);
     //gst_video_info_init(&sg_vinfo);
 
-    // create elements
+    // create elements (USE_STREAM == 1 || USE_STREAM == 2)
+    // souphttpsrc -> demuxer(qtdemux/matroskademux) -> avdec_h264 -> videoconvert -> tee
+    // tee -> autovideosink
+    // tee -> appsink
 #if USE_STREAM == 1
-    data.video_source = gst_element_factory_make("uridecodebin", "source");
-#else
-    data.video_source = gst_element_factory_make("videotestsrc", "source");
+    data.video_source = gst_element_factory_make("souphttpsrc", "source-souphttpsrc");
+    data.demuxer = gst_element_factory_make("qtdemux", "demuxer");
+    data.video_decoder = gst_element_factory_make("avdec_h264", "video_decoder");
+#elif USE_STREAM == 2
+    data.video_source = gst_element_factory_make("souphttpsrc", "source-souphttpsrc");
+    data.demuxer = gst_element_factory_make("matroskademux", "demuxer");
+    data.video_decoder = gst_element_factory_make("avdec_vp8", "video_decoder");
+#elif USE_STREAM == 3
+    data.video_source = gst_element_factory_make("rtspsrc", "source-rtspsrc");
+    data.demuxer = gst_element_factory_make("rtph264depay", "demuxer");
+    data.h264parse = gst_element_factory_make("h264parse", "h264parse");
+    data.video_decoder = gst_element_factory_make("avdec_h264", "video_decoder");
 #endif
 
     data.tee = gst_element_factory_make("tee", "tee");
@@ -92,21 +118,36 @@ int main(int argc, const char *argv[])
     data.pipeline = gst_pipeline_new("pipeline");
 
     // check above
-    if (!data.video_source || !data.tee || !data.video_queue || !data.app_queue || !data.video_convert || !data.dummy_sink || !data.app_sink || !data.pipeline)
+    if (!data.video_source ||
+        !data.demuxer || !data.video_decoder ||
+#if USE_STREAM == 3
+        !data.h264parse ||
+#endif
+        !data.tee || !data.video_queue || !data.app_queue || !data.video_convert || !data.dummy_sink || !data.app_sink || !data.pipeline)
     {
         g_printerr("Not all elements could be created.\n");
         return -1;
     }
 
     // build the pipeline
-    gst_bin_add_many(GST_BIN(data.pipeline), data.video_source,
+    gst_bin_add_many(GST_BIN(data.pipeline), data.video_source, data.demuxer, data.video_decoder,
+#if USE_STREAM == 3
+                     data.h264parse,
+#endif
                      data.tee,
                      data.video_queue, data.dummy_sink,
                      data.video_convert, data.app_queue, data.app_sink, NULL);
-#if USE_STREAM == 0
-    gst_element_link_many(data.video_source, data.video_convert, NULL);
+
+    //
+    //g_print("link test:%d\n", gst_element_link_many(data.demuxer, data.h264parse, data.video_decoder, NULL));
+    //
+#if USE_STREAM == 1 || USE_STREAM == 2
+    if (!gst_element_link_many(data.video_source, data.demuxer, NULL) ||
+#elif USE_STREAM == 3
+    if (!gst_element_link_many(data.demuxer, data.h264parse, data.video_decoder, NULL) ||
 #endif
-    if (!gst_element_link_many(data.video_convert, data.tee, NULL) ||
+        !gst_element_link_many(data.video_decoder, data.video_convert, NULL) ||
+        !gst_element_link_many(data.video_convert, data.tee, NULL) ||
         !gst_element_link_many(data.tee, data.video_queue, data.dummy_sink, NULL) ||
         !gst_element_link_many(data.tee, data.app_queue, data.app_sink, NULL))
     {
@@ -115,15 +156,20 @@ int main(int argc, const char *argv[])
         return -1;
     }
 
+
     // set element's properties
-#if USE_STREAM == 1
-    g_object_set(data.video_source, "uri", VIDEO_URL, NULL); // uridecodebin
+#if USE_STREAM == 1 || USE_STREAM == 2 || USE_STREAM == 3
+    g_object_set(data.video_source, "location", VIDEO_URL, NULL); // souphttpsrc
 #else
     g_object_set(data.video_source, "pattern", 0, NULL); // videotestsrc
 #endif
 
     // connect to the pad-added signal
+#if USE_STREAM == 1 || USE_STREAM == 2
+    g_signal_connect(data.demuxer, "pad-added", G_CALLBACK (pad_added_handler), &data);
+#elif USE_STREAM == 3
     g_signal_connect(data.video_source, "pad-added", G_CALLBACK(pad_added_handler), &data);
+#endif
 
     // configure appsink
     g_object_set(data.app_sink, "emit-signals", TRUE, NULL);
@@ -217,7 +263,11 @@ static GstFlowReturn new_sample(GstElement *sink, CustomData *data)
 
 static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data)
 {
-    GstPad *sink_pad = gst_element_get_static_pad(data->video_convert, "sink");
+#if USE_STREAM == 1 || USE_STREAM == 2
+    GstPad *sink_pad = gst_element_get_static_pad(data->video_decoder, "sink");
+#elif USE_STREAM == 3
+    GstPad *sink_pad = gst_element_get_static_pad(data->demuxer, "sink");
+#endif
     GstPadLinkReturn ret;
     GstCaps *new_pad_caps = NULL;
     GstStructure *new_pad_struct = NULL;
@@ -236,9 +286,15 @@ static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data
     new_pad_caps = gst_pad_get_current_caps(new_pad);
     new_pad_struct = gst_caps_get_structure(new_pad_caps, 0);
     new_pad_type = gst_structure_get_name(new_pad_struct);
-    if (!g_str_has_prefix(new_pad_type, "video/x-raw")) // "audio/x-raw"
+#if USE_STREAM == 1
+    if (!g_str_has_prefix(new_pad_type, "video/x-h264"))
+#elif USE_STREAM == 2
+    if (!g_str_has_prefix(new_pad_type, "video/x-vp8"))
+#elif USE_STREAM == 3
+    if (!g_str_has_prefix(new_pad_type, "application/x-rtp"))
+#endif
     {
-        g_print("It has type '%s' which is not raw video. Ignoring.\n", new_pad_type);
+        g_print("It has type '%s' which is not video. Ignoring.\n", new_pad_type);
         goto exit;
     }
 
@@ -261,3 +317,8 @@ exit:
     /* Unreference the sink pad */
     gst_object_unref(sink_pad);
 }
+
+// Opening in BLOCKING MODE
+// NvMMLiteOpen : Block : BlockType = 261
+// NVMEDIA: Reading vendor.tegra.display-size : status: 6
+// NvMMLiteBlockCreate : Block : BlockType = 261
