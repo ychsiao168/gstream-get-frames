@@ -1,58 +1,18 @@
-//==============================================================================
-/*
-    File Name:      main.c
-    Created:        2021/12/14
-    Author:
-    Description:
-
-*/
-//==============================================================================
-//
-//
-//  Copyright (C) 201X XXX Technology Co. Ltd. All rights reserved.
-//
-//
+// pipeline:
+//      filesrc -> matroskademux -> h264parse ->
+//      avdec_h264/nvv4l2decoder -> videoconvert -> tee
+//      tee -> autovideosink
+//      tee -> appsink
+// wget https://jell.yfish.us/media/jellyfish-5-mbps-hd-h264.mkv
 //==============================================================================
 //------------------------------------------------------------------------------
 //  Include Files
 //------------------------------------------------------------------------------
 #include <gst/gst.h>
-//#include <gst/video/video-frame.h>
-
 //------------------------------------------------------------------------------
 //  Local Defines
 //------------------------------------------------------------------------------
-#define USE_STREAM 1        // 1, 2, 3
-#define NV_DECODER_FIRST 0  // 1: nvv4l2decoder(unavailable on pc), 0: avdec_h264 or avdec_vp8
-
-#if USE_STREAM == 1
-#define VIDEO_URL "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-#if NV_DECODER_FIRST == 1
-#define DEFAULT_DECODER "nvv4l2decoder"
-#else
-#define DEFAULT_DECODER "avdec_h264"
-#endif
-// $ gst-launch-1.0 souphttpsrc location=http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4 ! qtdemux name=d d.video_0 ! h264parse ! avdec_h264 ! videoconvert ! autovideosink
-// souphttpsrc -> qtdemux !-> h264parse -> avdec_h264 -> videoconvert -> tee
-#elif USE_STREAM == 2
-#define VIDEO_URL "https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm"
-#if NV_DECODER_FIRST == 1
-#define DEFAULT_DECODER "nvv4l2decoder"
-#else
-#define DEFAULT_DECODER "avdec_vp8"
-#endif
-// $ gst-launch-1.0 souphttpsrc location=https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm ! matroskademux name=d d.video_0 ! avdec_vp8 ! videoconvert ! autovideosink
-// souphttpsrc -> matroskademux !-> avdec_vp8 -> videoconvert -> tee
-#elif USE_STREAM == 3
-#define VIDEO_URL "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4"
-#if NV_DECODER_FIRST == 1
-#define DEFAULT_DECODER "nvv4l2decoder"
-#else
-#define DEFAULT_DECODER "avdec_h264"
-#endif
-// $ gst-launch-1.0 rtspsrc location=rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink
-// rtspsrc !-> rtph264depay -> h264parse -> avdec_h264 -> videoconvert -> tee
-#endif
+#define USE_NVV4L2DECODER 1 // 1: nvv4l2decoder, 0: avdec_h264
 //------------------------------------------------------------------------------
 //  Local Data Structures
 //------------------------------------------------------------------------------
@@ -62,22 +22,15 @@ typedef struct _CustomData
     GstElement *video_source, *demuxer;
     GstElement *tee, *video_decoder, *video_convert, *dummy_sink, *app_sink;
     GstElement *video_queue, *app_queue;
-#if USE_STREAM == 1 || USE_STREAM == 3
     GstElement *h264parse;
-#endif
-
-    guint64 num_samples; /* Number of samples generated so far (for timestamp generation) */
-
-    guint sourceid; /* To control the GSource */
-
-    GMainLoop *main_loop; /* GLib's Main Loop */
     GstBus *bus;
     GstMessage *msg;
+    gboolean is_nv_decoder;
 } CustomData;
 //------------------------------------------------------------------------------
 //  Global Variables
 //------------------------------------------------------------------------------
-//static GstVideoInfo sg_vinfo;
+
 //------------------------------------------------------------------------------
 //  Local Prototypes
 //------------------------------------------------------------------------------
@@ -100,25 +53,26 @@ int main(int argc, const char *argv[])
 
     // init GStreamer
     gst_init(NULL, NULL);
-    //gst_video_info_init(&sg_vinfo);
 
     // create elements
-#if USE_STREAM == 1
-    data.video_source = gst_element_factory_make("souphttpsrc", "source-souphttpsrc");
-    data.demuxer = gst_element_factory_make("qtdemux", "demuxer");
-    data.h264parse = gst_element_factory_make("h264parse", "h264parse");
-    data.video_decoder = gst_element_factory_make(DEFAULT_DECODER, "video_decoder");
-#elif USE_STREAM == 2
-    data.video_source = gst_element_factory_make("souphttpsrc", "source-souphttpsrc");
+    data.video_source = gst_element_factory_make("filesrc", "source-filesrc");
     data.demuxer = gst_element_factory_make("matroskademux", "demuxer");
-    data.video_decoder = gst_element_factory_make(DEFAULT_DECODER, "video_decoder");
-#elif USE_STREAM == 3
-    data.video_source = gst_element_factory_make("rtspsrc", "source-rtspsrc");
-    data.demuxer = gst_element_factory_make("rtph264depay", "demuxer");
     data.h264parse = gst_element_factory_make("h264parse", "h264parse");
-    data.video_decoder = gst_element_factory_make(DEFAULT_DECODER, "video_decoder");
+#if USE_NVV4L2DECODER == 1
+    data.video_decoder = gst_element_factory_make("nvv4l2decoder", "video_decoder");
+    if(!data.video_decoder)
+    {
+        data.video_decoder = gst_element_factory_make("avdec_h264", "video_decoder");
+        g_print("avdec_h264 is used\n");
+        data.is_nv_decoder = FALSE;
+    } else
+    {
+        g_print("nvv4l2decoder is used\n");
+        data.is_nv_decoder = TRUE;
+    }
+#else
+    data.video_decoder = gst_element_factory_make("avdec_h264", "video_decoder");
 #endif
-
     data.tee = gst_element_factory_make("tee", "tee");
     data.video_queue = gst_element_factory_make("queue", "video_queue");
     data.app_queue = gst_element_factory_make("queue", "app_queue");
@@ -132,9 +86,7 @@ int main(int argc, const char *argv[])
     // check above
     if (!data.video_source ||
         !data.demuxer || !data.video_decoder ||
-#if USE_STREAM == 1 || USE_STREAM == 3
         !data.h264parse ||
-#endif
         !data.tee || !data.video_queue || !data.app_queue || !data.video_convert || !data.dummy_sink || !data.app_sink || !data.pipeline)
     {
         g_printerr("Not all elements could be created.\n");
@@ -143,22 +95,13 @@ int main(int argc, const char *argv[])
 
     // build the pipeline
     gst_bin_add_many(GST_BIN(data.pipeline), data.video_source, data.demuxer, data.video_decoder,
-#if USE_STREAM == 1 || USE_STREAM == 3
                      data.h264parse,
-#endif
                      data.tee,
                      data.video_queue, data.dummy_sink,
                      data.video_convert, data.app_queue, data.app_sink, NULL);
 
-#if USE_STREAM == 1
     if (!gst_element_link_many(data.video_source, data.demuxer, NULL) ||
-        !gst_element_link_many(data.h264parse, data.video_decoder, NULL) ||
-#elif USE_STREAM == 2
-    if (!gst_element_link_many(data.video_source, data.demuxer, NULL) ||
-#elif USE_STREAM == 3
-    if (!gst_element_link_many(data.demuxer, data.h264parse, data.video_decoder, NULL) ||
-#endif
-        !gst_element_link_many(data.video_decoder, data.video_convert, data.tee, NULL) ||
+        !gst_element_link_many(data.h264parse, data.video_decoder, data.video_convert, data.tee, NULL) ||
         !gst_element_link_many(data.tee, data.video_queue, data.dummy_sink, NULL) ||
         !gst_element_link_many(data.tee, data.app_queue, data.app_sink, NULL))
     {
@@ -167,19 +110,23 @@ int main(int argc, const char *argv[])
         return -1;
     }
 
+
     // set element's properties
-    g_object_set(data.video_source, "location", VIDEO_URL, NULL); // souphttpsrc
+    g_object_set(data.video_source, "location", "jellyfish-5-mbps-hd-h264.mkv", NULL);
 
     // connect to the pad-added signal
-#if USE_STREAM == 1 || USE_STREAM == 2
-    g_signal_connect(data.demuxer, "pad-added", G_CALLBACK(pad_added_handler), &data);
-#elif USE_STREAM == 3
-    g_signal_connect(data.video_source, "pad-added", G_CALLBACK(pad_added_handler), &data);
-#endif
+    g_signal_connect(data.demuxer, "pad-added", G_CALLBACK (pad_added_handler), &data);
 
     // configure appsink
     g_object_set(data.app_sink, "emit-signals", TRUE, NULL);
     g_signal_connect(data.app_sink, "new-sample", G_CALLBACK(new_sample), &data);
+
+    // configure nvv4l2decoder
+    if(data.is_nv_decoder)
+    {
+        g_print("set capture-io-mode 2\n");
+        g_object_set(data.video_decoder, "capture-io-mode", 2, NULL);
+    }
 
     // start playing
     ret = gst_element_set_state(data.pipeline, GST_STATE_PLAYING);
@@ -240,7 +187,6 @@ static GstFlowReturn new_sample(GstElement *sink, CustomData *data)
     GstSample *sample;
     GstBuffer *buffer;
     GstMapInfo map;
-    //GstVideoFrame vframe;
 
     /* Retrieve the buffer */
     g_signal_emit_by_name(sink, "pull-sample", &sample);
@@ -249,19 +195,14 @@ static GstFlowReturn new_sample(GstElement *sink, CustomData *data)
     {
         buffer = gst_sample_get_buffer(sample);
         gst_buffer_map(buffer, &map, GST_MAP_READ);
-        // if(gst_video_frame_map(&vframe, &sg_vinfo, buffer, GST_MAP_READ))
-        // {
-        //     g_print("frame size=%6lu, width=%4d, height=%4d\n", map.size, vframe.info.width, vframe.info.height);
-        //     gst_video_frame_unmap (&vframe);
-        // }
-        g_print("%8lu, frame size=%6lu, data=0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X\n",
-                data->num_samples,
-                map.size,
-                *(guint16 *)&map.data[0], *(guint16 *)&map.data[1], *(guint16 *)&map.data[2], *(guint16 *)&map.data[3],
-                *(guint16 *)&map.data[4], *(guint16 *)&map.data[5], *(guint16 *)&map.data[6], *(guint16 *)&map.data[7]);
-        gst_buffer_unmap(buffer, &map);
+
+        g_print("frame size=%6lu, data=0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X, 0x%04X\n",
+            map.size,
+            *(guint16*)&map.data[0], *(guint16*)&map.data[1], *(guint16*)&map.data[2], *(guint16*)&map.data[3],
+            *(guint16*)&map.data[4], *(guint16*)&map.data[5], *(guint16*)&map.data[6], *(guint16*)&map.data[7]
+        );
+        gst_buffer_unmap (buffer, &map);
         gst_sample_unref(sample);
-        data->num_samples++;
         return GST_FLOW_OK;
     }
 
@@ -270,13 +211,7 @@ static GstFlowReturn new_sample(GstElement *sink, CustomData *data)
 
 static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data)
 {
-#if USE_STREAM == 1
     GstPad *sink_pad = gst_element_get_static_pad(data->h264parse, "sink");
-#elif USE_STREAM == 2
-    GstPad *sink_pad = gst_element_get_static_pad(data->video_decoder, "sink");
-#elif USE_STREAM == 3
-    GstPad *sink_pad = gst_element_get_static_pad(data->demuxer, "sink");
-#endif
     GstPadLinkReturn ret;
     GstCaps *new_pad_caps = NULL;
     GstStructure *new_pad_struct = NULL;
@@ -295,13 +230,7 @@ static void pad_added_handler(GstElement *src, GstPad *new_pad, CustomData *data
     new_pad_caps = gst_pad_get_current_caps(new_pad);
     new_pad_struct = gst_caps_get_structure(new_pad_caps, 0);
     new_pad_type = gst_structure_get_name(new_pad_struct);
-#if USE_STREAM == 1
     if (!g_str_has_prefix(new_pad_type, "video/x-h264"))
-#elif USE_STREAM == 2
-    if (!g_str_has_prefix(new_pad_type, "video/x-vp8"))
-#elif USE_STREAM == 3
-    if (!g_str_has_prefix(new_pad_type, "application/x-rtp"))
-#endif
     {
         g_print("It has type '%s' which is not video. Ignoring.\n", new_pad_type);
         goto exit;
