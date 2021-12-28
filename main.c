@@ -326,3 +326,8 @@ exit:
     /* Unreference the sink pad */
     gst_object_unref(sink_pad);
 }
+
+// Opening in BLOCKING MODE
+// NvMMLiteOpen : Block : BlockType = 261
+// NVMEDIA: Reading vendor.tegra.display-size : status: 6
+// NvMMLiteBlockCreate : Block : BlockType = 261
