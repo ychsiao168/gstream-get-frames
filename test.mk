@@ -15,7 +15,7 @@ RM = rm -f
 OPT= -O2
 CFLAGS=-Wall -I$(srcdir) $(OPT) $(shell pkg-config --cflags gstreamer-1.0)
 LDFLAGS=-s
-LDLIBS=$(shell pkg-config --libs gstreamer-1.0 gstreamer-video-1.0)
+LDLIBS=$(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0)
 #===============================================================================
 #  OBJS and Output
 #===============================================================================
