@@ -15,7 +15,7 @@ RM = rm -f
 OPT= -O2
 CFLAGS=-Wall -I$(srcdir) $(OPT) $(shell pkg-config --cflags gstreamer-1.0)
 LDFLAGS=-s
-LDLIBS=$(shell pkg-config --libs gstreamer-1.0 gstreamer-video-1.0)
+LDLIBS=$(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0)
 #===============================================================================
 #  OBJS and Output
 #===============================================================================
@@ -38,12 +38,12 @@ all: all-before $(OUTPUT1) all-after
 $(OUTPUT1): $(OBJS)
 	@echo Linking $@
 	@$(LD) -o $@ $^ $(LDFLAGS) $(LDLIBS)
-     
+
 clean:
 	@$(RM) $(OBJS) $(OUTPUT1)
-     
+
 all-before:
 	@clear
-     
+
 all-after:
 	@echo Done @ $$(date)
