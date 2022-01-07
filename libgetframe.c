@@ -20,6 +20,7 @@
 //  Local Defines
 //------------------------------------------------------------------------------
 #define HAS_NV_DECODER (1)  // 1: on jetson board, 0: general platform
+#define SHOW_VIDEO (0)      // 1: show, 0: not show
 //------------------------------------------------------------------------------
 //  Local Data Structures
 //------------------------------------------------------------------------------
@@ -63,10 +64,14 @@ int fourd_init_frame(const char* url, fp_frame_cb cb)
     sg_data.frame_callback = cb;
 
     // launch pipeline
-#if HAS_NV_DECODER == 1
-    snprintf(&launch_cmd[0], sizeof(launch_cmd), "uridecodebin uri=%s ! nvvidconv ! video/x-raw,format=NV12 ! appsink name=mysink", url); // nvidia
-#else
-    snprintf(&launch_cmd[0], sizeof(launch_cmd), "uridecodebin uri=%s ! videoconvert ! appsink name=mysink", url); // for non-nvidia
+#if HAS_NV_DECODER == 1 && SHOW_VIDEO == 0
+    snprintf(&launch_cmd[0], sizeof(launch_cmd), "uridecodebin uri=%s ! nvvidconv ! video/x-raw,format=NV12 ! appsink name=mysink", url); // nvidia, show == 0
+#elif HAS_NV_DECODER == 1 && SHOW_VIDEO == 1
+    snprintf(&launch_cmd[0], sizeof(launch_cmd), "uridecodebin uri=%s ! tee name=t ! queue ! nvvidconv ! video/x-raw,format=NV12 ! appsink name=mysink t. ! queue ! videoconvert ! autovideosink", url); // nvidia, show == 1
+#elif HAS_NV_DECODER == 0 && SHOW_VIDEO == 0
+    snprintf(&launch_cmd[0], sizeof(launch_cmd), "uridecodebin uri=%s ! videoconvert ! appsink name=mysink", url); // for non-nvidia, show == 0
+#elif HAS_NV_DECODER == 0 && SHOW_VIDEO == 1
+    snprintf(&launch_cmd[0], sizeof(launch_cmd), "uridecodebin uri=%s ! tee name=t ! queue ! videoconvert ! appsink name=mysink t. ! queue ! videoconvert ! autovideosink", url); // for non-nvidia, show == 1
 #endif
     sg_data.pipeline = (GstPipeline *)gst_parse_launch(launch_cmd, &error);
     gst_element_set_state((GstElement *)sg_data.pipeline, GST_STATE_PLAYING);

@@ -22,6 +22,7 @@ int main(int argc, char* argv[])
     // https://www.freedesktop.org/software/gstreamer-sdk/data/media/sintel_trailer-480p.webm
     // rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4
     // rtsp://176.122.164.163:8554/jellyfish-5-mbps-hd-h264.mkv
+    // rtsp://username:password@192.168.1.145/stream-2.sdp
 
     fourd_init_frame("https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", get_frame_cb);
     fourd_start_frame_loop();   // block until end of stream.
